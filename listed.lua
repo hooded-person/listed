@@ -1,0 +1,407 @@
+local cc_expect = require "cc.expect"
+local expect = cc_expect.expect
+local field = cc_expect.field
+local pretty = require "cc.pretty"
+
+---@class listedColumnPattern
+---@field type type|type[] Type(s) of the column
+---@field header string? Header of the column
+---@field width integer? Width of the column when rendered, if nil it is auto-generated
+
+---@class listedColumnPatternUnified
+---@field type type[]
+---@field header string?
+---@field width integer?
+
+---Validates column patterns
+---@param ... type|listedColumnPattern One or more column patterns
+---@return listedColumnPatternUnified[]? columns The validated and unified column patterns
+---@return string? err Error if a column pattern failed validation
+local function validateColumnPattern(...)
+    local patterns = {}
+    for i = 1, select("#", ...) do
+        local pattern = select(i, ...)
+
+        -- "string" -> { type = "string"}
+        if type(pattern) == "string" then
+            ---@type listedColumnPatternUnified
+            pattern = { type = { pattern } }
+        end
+
+        -- pattern.type
+        local columnType = pattern
+            .type -- for some reason if i use `pattern.type` directly lsp doesnt understand that its type is string
+        if type(columnType) == "string" then
+            pattern.type = { columnType }
+        elseif type(columnType) ~= "table" then
+            return nil, ("bad pattern #%d type (string or table expected, got %s)"):format(i, type(columnType))
+        end
+
+        -- pattern.header
+        if pattern.header and type(pattern.header) ~= "string" then
+            return nil, ("bad pattern #%d header (string expected, got %s)"):format(i, type(pattern.header))
+        end
+
+        -- pattern.width
+        if pattern.width and type(pattern.width) ~= "number" then
+            return nil, ("bad pattern #%d width (integer number expected, got %s)"):format(i, type(pattern.width))
+        end
+        if pattern.width and pattern.width % 1 ~= 0 then
+            return nil, ("bad pattern #%d width (number is not an integer)"):format(i, type(pattern.width))
+        end
+
+        table.insert(patterns, pattern)
+    end
+
+    return patterns
+end
+
+---Validate a row according to a column pattern
+---@param row table The row to validate
+---@param columnPatterns listedColumnPattern[] The column patterns to validate with
+---@return boolean ok Wether the validation was successfull
+---@return string? err Error message if validation failed
+local function validateRow(row, columnPatterns)
+    if type(row) ~= "table" then
+        return false, ("Row must be a table, not a %s"):format(type(row))
+    end
+    expect(2, columnPatterns, "table")
+    local columns, valErr = validateColumnPattern(table.unpack(columnPatterns))
+    if not columns then
+        error("Invalid column pattern: " .. valErr, 2)
+    end
+
+    if #row ~= #columns then
+        return false, ("Expected %d columns, got %d columns"):format(#columns, #row)
+    end
+    for i = 1, #row do
+        local column = row[i]
+        local pattern = columns[i]
+
+        local ok, err = pcall(function() expect(i, column, table.unpack(pattern.type)) end)
+        if not ok and err then
+            return false, err:gsub("argument", "column")
+        end
+    end
+    return true
+end
+
+---Calculates dynamic widths, very basic and stuff.
+---@param totalWidth integer Total width available
+---@param rows any[][]
+---@param columns listedColumnPatternUnified[]
+---@param gapSize integer Width of gaps between columns
+---@return integer[]? widths Table of column width, or nil in case of failure
+---@return string? err Reason of failure
+local function calculateWidths(totalWidth, rows, columns, gapSize)
+    gapSize = gapSize or 1
+    local totalGapSize = (#columns - 1) * gapSize
+
+    ---@type integer[]
+    local fixed = {}
+    local fixedSum = 0
+    for i, column in ipairs(columns) do
+        if column.width then
+            fixed[i] = column.width
+            fixedSum = fixedSum + column.width
+        end
+    end
+    if fixedSum + totalGapSize > totalWidth then
+        return nil, "sum of fixed width columns + gapsize for all columns exeeds available width"
+    end
+
+    ---@type integer[]
+    local maxWidths = {}
+    for _, row in ipairs(rows) do
+        for columnI, v in ipairs(row) do
+            local width = #tostring(v)
+            if not maxWidths[columnI] or width > maxWidths[columnI] then
+                maxWidths[columnI] = width
+            end
+        end
+    end
+
+    local totalMaxWidth = 0
+    for i, maxWidth in ipairs(maxWidths) do
+        if fixed[i] == nil then
+            totalMaxWidth = totalMaxWidth + maxWidth
+        end
+    end
+
+    ---@type integer[]
+    local computedWidths = {}
+    local remainingWidth = totalWidth - totalGapSize - fixedSum -- Remaining for dynamic columns
+
+    local assignedWidth = 0
+    local remainders = {}
+    for i, maxWidth in ipairs(maxWidths) do
+        if fixed[i] ~= nil then
+            computedWidths[i] = fixed[i]
+        else
+            local weight = maxWidth / totalMaxWidth
+            local width = math.floor(weight * remainingWidth)
+            local exactWidth = (maxWidth / totalMaxWidth) * remainingWidth
+            local width = math.floor(exactWidth)
+
+            computedWidths[i] = width
+            assignedWidth = assignedWidth + width
+
+            table.insert(remainders, {
+                index = i,
+                remainder = exactWidth - width,
+            })
+        end
+    end
+
+    local leftover = remainingWidth - assignedWidth
+
+    table.sort(remainders, function(a, b)
+        return a.remainder > b.remainder
+    end)
+
+    for i = 1, leftover do
+        computedWidths[remainders[i].index] =
+            computedWidths[remainders[i].index] + 1
+    end
+
+    return computedWidths
+end
+
+---Stringify and cutoff `value` if its longer than `width`. Trunctuates with `cutoff_str`.
+---@param value any Value to stringify and trunctuate
+---@param width integer Max width of the returned string
+---@param cutoff_str string String to append after cutoff entries
+---@return string result Trunctuated string
+local function cutoff(value, width, cutoff_str)
+    value = tostring(value)
+    cutoff_str = cutoff_str or "..."
+    if #value <= width then
+        return value
+    else
+        return value:sub(1, width - #cutoff_str) .. cutoff_str
+    end
+end
+
+---@class listedList
+---@field win table The window this list is displayed to
+---@field columns listedColumnPatternUnified Number of columns in the list
+---@field config listedConfig Configuration for the list display
+---@field rows table[] Rows in this list. Do not modify, use :set, :add, :addMany
+local listed = {}
+
+---@type metatable
+local listed_meta = {
+    ---@param table listedList
+    ---@param key any
+    ---@return unknown
+    __index = function(table, key)
+        if type(key) == "number" then
+            return table.rows[key]
+        else
+            return listed[key]
+        end
+    end,
+    ---@param table listedList
+    ---@param key any
+    ---@param value any
+    __newindex = function(table, key, value)
+        if type(key) ~= "number" then
+            rawset(table, key, value)
+        else
+            if key > #table.rows + 1 or key < 1 then
+                error(
+                    ("List rows must be sequential, can not insert at #%d in list of length %d"):format(key, #table.rows),
+                    2)
+            end
+
+            local ok, err = validateRow(value, table.columns)
+            if not ok then
+                error(err, 2)
+            end
+
+            table.rows[key] = value
+        end
+    end,
+    ---@param table listedList
+    ---@return integer
+    __len = function(table)
+        return #table.rows
+    end
+}
+
+---@class listedConfig
+---@field columns listedColumnPattern[] The columns of the list
+---@field gapSize number? Size of the gap between columns. default:0
+---@field pretty boolean? Use cc.pretty for writing values
+---@field backgroundColors integer[]? List of background colors that are alternated between per row. default:{colors.lightGray,colors.gray}
+---@field style listedConfigStyle? List style
+
+---@class listedConfigStyle
+---@field headerFg integer? Header text color. default:colors.white
+---@field headerBg integer? Header background color. default:colors.gray
+---@field rowFg integer|integer[]? Row text colors. List of colors to alternate between. default:{colors.white}
+---@field rowBg integer|integer[]? Row background colors. List of colors to alternate between. default:{colors.black, colors.gray}
+
+---Create a new list
+---@param win table A `window.create` instance
+---@param config listedConfig A table with the config
+---@return listedList
+local function create(win, config)
+    expect(1, win, "table")
+    expect(2, config.columns, "table")
+    local columns, err = validateColumnPattern(table.unpack(config.columns))
+    if not columns or err then
+        error(err, 2)
+    end
+    expect(3, config, "table", "nil")
+    config = config or {}
+    field(config, "gapSize", "number", "nil")
+    config.gapSize = config.gapSize or 0
+    field(config, "pretty", "boolean", "nil")
+    config.pretty = config.pretty or false
+
+    field(config, "style", "table", "nil")
+    config.style = config.style or {}
+
+    field(config.style, "headerFg", "number", "nil")
+    config.style.headerFg = config.style.headerFg or colors.white
+    field(config.style, "headerBg", "number", "nil")
+    config.style.headerBg = config.style.headerBg or colors.lightGray
+
+    field(config.style, "rowFg", "number", "table", "nil")
+    if type(config.style.rowFg) == "number" then config.style.rowFg = { config.style.rowFg } end ---@diagnostic disable-line: assign-type-mismatch
+    config.style.rowFg = config.style.rowFg or { colors.white }
+    field(config.style, "rowBg", "number", "table", "nil")
+    if type(config.style.rowBg) == "number" then config.style.rowBg = { config.style.rowBg } end ---@diagnostic disable-line: assign-type-mismatch
+    config.style.rowBg = config.style.rowBg or { colors.black, colors.gray }
+
+    local t            = setmetatable({}, listed_meta)
+    t.win              = win
+    t.columns          = config.columns
+    t.config           = config
+    t.rows             = {}
+
+    win.setVisible(false)
+
+    return t
+end
+
+--#region(collapsed) List modification
+function listed:set(...)
+    local rows = {}
+    for i = 1, select("#", ...) do
+        local row = select(i, ...)
+
+        local ok, err = validateRow(row, self.columns)
+        if not ok then
+            error(err, 2)
+        end
+
+        table.insert(rows, row)
+    end
+    self.rows = rows
+end
+
+---Add a row of data to the list
+---@param ... any Either a table containing a row or a each collumn seperate
+function listed:add(...)
+    local columns = { ... }
+    if #columns == 0 then
+        error("Expected column data", 2)
+    end
+    if #columns == 1 and type(columns[1]) == "table" then
+        columns = columns[1]
+    end
+
+    -- type validation for seperate columns
+    local ok, err = validateRow(columns, self.columns)
+    if not ok then
+        error(err, 2)
+    end
+
+    table.insert(self.rows, columns)
+end
+
+---Add multiple rows of data to the list
+---@param ... table Tables containing seperate rows
+function listed:addMany(...)
+    local args = { ... }
+    for i = 1, #args do
+        local ok, err = pcall(function() self:add(args[i]) end)
+        if not ok and err then
+            error(err:gsub("#", ("#%d."):format(i)), 2)
+        end
+    end
+end
+
+--#endregion
+
+---Display the list and gather input for it
+function listed:display(offset)
+    offset = offset or 0
+    if type(offset) ~= "number" or offset < 0 then
+        error(("The offset must be a postitive integer, not %d"):format(offset))
+    end
+
+    self.win.setVisible(true)
+    local w, h = self.win.getSize()
+    local widths, err = calculateWidths(w, self.rows, self.columns, self.config.gapSize)
+    if not widths then
+        error("Failed to calculate widths, sorry: " .. err)
+    end
+
+    local oldTerm = term.current()
+    term.redirect(self.win)
+    local oldTextColor = term.getTextColor()
+    local oldBackgroundColor = term.getBackgroundColor()
+
+    term.setCursorPos(1, 1)
+    term.setTextColor(self.config.style.headerFg)
+    term.setBackgroundColor(self.config.style.headerBg)
+    term.clearLine()
+
+    local accX = 1
+    local accXAt = {}
+    for i, column in ipairs(self.columns) do
+        accXAt[i] = accX
+        term.setCursorPos(accX, 1)
+        term.write(cutoff(column.header, widths[i], self.config.cutoff))
+        accX = accX + widths[i] + self.config.gapSize
+    end
+    for rowI = 1 + offset, math.min(#self.rows, h-1) do
+        local row = self.rows[rowI]
+        term.setCursorPos(1, rowI + 1)
+
+        local fgColor = self.config.style.rowFg[((rowI - 1) % #self.config.style.rowFg) + 1]
+        term.setBackgroundColor(fgColor)
+        local bgColor = self.config.style.rowBg[((rowI - 1) % #self.config.style.rowBg) + 1]
+        term.setBackgroundColor(bgColor)
+        term.clearLine()
+        for columnI, value in ipairs(row) do
+            term.setCursorPos(accXAt[columnI], rowI + 1)
+            local value_str = cutoff(value, widths[columnI], self.config.cutoff)
+            if self.config.pretty then
+                value_str = cutoff(pretty.render(pretty.pretty(value)), widths[columnI], self.config.cutoff)
+                if type(value) == "string" then
+                    term.setTextColor(colors.red)
+                elseif type(value) == "number" then
+                    term.setTextColor(colors.magenta)
+                elseif type(value) == "boolean" then
+                    term.setTextColor(colors.gray)
+                end
+            end
+            term.write(value_str)
+        end
+    end
+
+    term.setTextColor(oldTextColor)
+    term.setBackgroundColor(oldBackgroundColor)
+
+    term.redirect(oldTerm)
+
+    self.win.setVisible(false)
+end
+
+return {
+    create = create
+}
