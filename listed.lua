@@ -1,7 +1,6 @@
 local cc_expect = require "cc.expect"
 local expect = cc_expect.expect
 local field = cc_expect.field
-local pretty = require "cc.pretty"
 
 ---@class listedColumnPattern
 ---@field type type|type[] Type(s) of the column
@@ -234,7 +233,7 @@ local listed_meta = {
 ---@class listedConfig
 ---@field columns listedColumnPattern[] The columns of the list
 ---@field gapSize number? Size of the gap between columns. default:0
----@field pretty boolean? Use cc.pretty for writing values
+---@field pretty boolean? Use different text color based on value type
 ---@field backgroundColors integer[]? List of background colors that are alternated between per row. default:{colors.lightGray,colors.gray}
 ---@field style listedConfigStyle? List style
 
@@ -366,24 +365,31 @@ function listed:sort(by, desc)
 end
 
 ---Display the list and gather input for it
-function listed:display(offset, sortBy, sortDesc)
+function listed:display(offset, sortBy, sortDesc, scrollbar, scrollmode)
     expect(1, offset, "number", "nil")
     offset = offset or 0
     if type(offset) ~= "number" or offset < 0 then
-        error(("The offset must be a postitive integer, not %d"):format(offset))
+        term.setCursorPos(1, 1)
+        error(("The offset must be a postitive integer, not %d"):format(offset), 2)
     end
     expect(2, sortBy, "number", "nil")
     expect(3, sortDesc, "boolean", "nil")
     if sortDesc ~= nil and sortBy == nil then
         error("Bad arguments, #2 required when #3 supplied", 2)
     end
-
     if sortBy ~= nil and sortBy > 0 then
         self:sort(sortBy, sortDesc)
     end
+    if not scrollmode then
+        scrollmode = "onlyLast"
+    end
+    assert(scrollmode == "revealLast" or scrollmode == "onlyLast",
+        "scrollmode must be either 'onlyLast' or 'revealLast'")
+
 
     self.win.setVisible(false)
     local w, h = self.win.getSize()
+    if scrollbar == true then w = w - 1 end
     local widths, err = calculateWidths(w, self.rows, self.columns, self.config.gapSize)
     if not widths then
         error("Failed to calculate widths, sorry: " .. err)
@@ -393,6 +399,9 @@ function listed:display(offset, sortBy, sortDesc)
     term.redirect(self.win)
     local oldTextColor = term.getTextColor()
     local oldBackgroundColor = term.getBackgroundColor()
+
+    term.setBackgroundColor(self.config.style.rowBg[1])
+    term.clear()
 
     term.setCursorPos(1, 1)
     term.setTextColor(self.config.style.headerFg)
@@ -414,7 +423,8 @@ function listed:display(offset, sortBy, sortDesc)
         term.write(cutoff(headerStr, widths[i], self.config.cutoff))
         accX = accX + widths[i] + self.config.gapSize
     end
-    for rowI = 1 + offset, math.min(#self.rows, h - 1) do
+    -- error(#self.rows, h - 1 + offset)
+    for rowI = 1 + offset, math.min(#self.rows, h - 1 + offset) do
         local row = self.rows[rowI]
         local rowY = rowI + 1 - offset
         term.setCursorPos(1, rowY)
@@ -428,16 +438,49 @@ function listed:display(offset, sortBy, sortDesc)
             term.setCursorPos(accXAt[columnI], rowY)
             local value_str = cutoff(value, widths[columnI], self.config.cutoff)
             if self.config.pretty then
-                value_str = cutoff(pretty.render(pretty.pretty(value)), widths[columnI], self.config.cutoff)
+                value_str = cutoff(value, widths[columnI], self.config.cutoff)
                 if type(value) == "string" then
                     term.setTextColor(colors.red)
                 elseif type(value) == "number" then
                     term.setTextColor(colors.magenta)
-                elseif type(value) == "boolean" then
+                elseif type(value) == "boolean" and value then
+                    term.setTextColor(colors.lime)
+                elseif type(value) == "boolean" and not value then
+                    term.setTextColor(colors.red)
+                elseif type(value) == "table" then
                     term.setTextColor(colors.gray)
                 end
             end
             term.write(value_str)
+        end
+    end
+
+    -- scrollbar
+    local scrollHeight
+    if scrollbar then
+        local maxOffset = #self.rows - 1
+        if scrollmode == "revealLast" then
+            maxOffset = maxOffset - h + 2
+            if maxOffset < 0 then maxOffset = 0 end
+        end
+
+        local barHeight = math.floor(h * h / #self.rows)
+        scrollHeight = h - barHeight - 3
+        local barPos = scrollHeight * (offset / (maxOffset - 1))
+        for y = 2, h do
+            term.setCursorPos(w + 1, y)
+            term.setTextColor(colors.gray)
+            term.setBackgroundColor(colors.lightGray)
+            if y > 2 + barPos and y - 2 < barPos + barHeight and y < h then
+                term.setBackgroundColor(colors.gray)
+            end
+            if y == 2 then
+                term.write("\x1E")
+            elseif y == h then
+                term.write("\x1F")
+            else
+                term.write(" ")
+            end
         end
     end
 
@@ -448,20 +491,44 @@ function listed:display(offset, sortBy, sortDesc)
 
     self.win.setVisible(true)
 
-    return widths
+    return widths, scrollHeight
 end
 
-function listed:run(offset, sortBy, sortDesc)
+---@class listedRunOptions
+---@field sortBy? integer Column to sort by, can be gotten from list.c.ColumnHeader
+---@field sortDesc? boolean Sort descending instead of ascending
+---@field lockSorting? boolean Prevent changing sort column and sort direction
+---@field scrollbar? boolean Show a scrollbar
+---@field scrollmode? "onlyLast"|"revealLast" Scrollmode for scrolling. "onlyLast" will allow scrolling until only the last item is visible. "revealLast" will allow scrolling until the last item is on the bottom line. default:"onlyLast"
+
+---Run the interactive list display
+---@param offset integer
+---@param options listedRunOptions
+function listed:run(offset, options)
+    local sortBy, sortDesc, scrollbar = options.sortBy, options.sortDesc, options.scrollbar
+    field(options, "scrollmode", "string", "nil")
+    if not options.scrollmode then
+        options.scrollmode = "onlyLast"
+    end
+    assert(options.scrollmode == "revealLast" or options.scrollmode == "onlyLast",
+        "scrollmode must be either 'onlyLast' or 'revealLast'")
+    field(options, "lockSorting", "boolean", "nil")
+    if options.lockSorting == nil then
+        options.lockSorting = false
+    end
+
+    local mouse_dragging_scrolbar = nil
     while true do
-        local columnWidths = self:display(offset, sortBy, sortDesc)
+        local columnWidths, scrollHeight = self:display(offset, sortBy, sortDesc, scrollbar, options.scrollmode)
         local data = { os.pullEvent() }
         local event = table.remove(data, 1)
-        if event == "mouse_click" then
+        local wW, wH = self.win.getSize()
+        local wX, wY = self.win.getPosition()
+        if event == "mouse_click" and not options.lockSorting then
             local btn, x, y = table.unpack(data)
-            local wX, wY = self.win.getPosition()
             x = x - wX + 1
             y = y - wY + 1
-            if btn == 1 and y == 1 then --left click
+            if btn == 1 and y == 1 then --left click on top bar
                 local column = 0
                 local acc = 0
                 for i, width in ipairs(columnWidths) do
@@ -482,7 +549,37 @@ function listed:run(offset, sortBy, sortDesc)
                 else
                     sortDesc = not sortDesc
                 end
+            elseif scrollbar and btn == 1 and x == wW then
+                if y == 2 then
+                    offset = offset - 1
+                elseif y == wH then
+                    offset = offset + 1
+                else
+                    mouse_dragging_scrolbar = y
+                end
+                term.clear()
+                term.setCursorPos(1, 1)
             end
+        elseif event == "mouse_scroll" then
+            local dir, x, y = table.unpack(data)
+            offset = offset + dir
+        elseif event == "mouse_drag" and scrollbar and mouse_dragging_scrolbar then
+            local btn, x, y = table.unpack(data)
+            local diff = y - mouse_dragging_scrolbar
+            local distance = math.floor(diff * #self.rows / scrollHeight)
+            offset = offset + distance
+            mouse_dragging_scrolbar = y
+        end
+
+        local maxOffset = #self.rows - 1
+        if options.scrollmode == "revealLast" then
+            maxOffset = maxOffset - wH + 2
+            if maxOffset < 0 then maxOffset = 0 end
+        end
+        if offset < 0 then
+            offset = 0
+        elseif offset > maxOffset then
+            offset = maxOffset
         end
     end
 end

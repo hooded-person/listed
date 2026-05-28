@@ -48,6 +48,7 @@ while restart do
     if changed then
         if changed ~= shell.getRunningProgram() then
             print(("File '%s' contents changed, reloading"):format(changed))
+            sleep(1)
         else
             print("This file got changed, 'tailcalling' new version")
             restart = false
