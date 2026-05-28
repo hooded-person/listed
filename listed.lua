@@ -367,7 +367,7 @@ end
 
 ---Display the list and gather input for it
 function listed:display(offset, sortBy, sortDesc)
-    expect(1, offset, "number", nil)
+    expect(1, offset, "number", "nil")
     offset = offset or 0
     if type(offset) ~= "number" or offset < 0 then
         error(("The offset must be a postitive integer, not %d"):format(offset))
