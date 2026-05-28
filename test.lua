@@ -27,7 +27,7 @@ local list = listed.create(win, {
 })
 
 
-list:set (
+list:set(
     { 1, "hi", 1 },
     { 2, "bye", 4 }
 )
@@ -35,4 +35,6 @@ list:set (
 list:add { 3, "string", 0 }
 list:add { 4, "averyveryveryverylongbigstringthatisclippedandold", 324 }
 
-list:display()
+list:sort(3, false)
+
+list:display(0, list.c.Id)

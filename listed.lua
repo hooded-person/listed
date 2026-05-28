@@ -7,6 +7,7 @@ local pretty = require "cc.pretty"
 ---@field type type|type[] Type(s) of the column
 ---@field header string? Header of the column
 ---@field width integer? Width of the column when rendered, if nil it is auto-generated
+---@field sorting? fun(a:any,b:any):boolean Sorting function used when sorting by this column
 
 ---@class listedColumnPatternUnified
 ---@field type type[]
@@ -187,6 +188,7 @@ end
 ---@field columns listedColumnPatternUnified Number of columns in the list
 ---@field config listedConfig Configuration for the list display
 ---@field rows table[] Rows in this list. Do not modify, use :set, :add, :addMany
+---@field c table<string, integer> Maps column header name to column index
 local listed = {}
 
 ---@type metatable
@@ -244,7 +246,7 @@ local listed_meta = {
 
 ---Create a new list
 ---@param win table A `window.create` instance
----@param config listedConfig A table with the config
+---@param config listedConfig A table with the config for the list
 ---@return listedList
 local function create(win, config)
     expect(1, win, "table")
@@ -280,6 +282,11 @@ local function create(win, config)
     t.columns          = config.columns
     t.config           = config
     t.rows             = {}
+    t.c                = {}
+
+    for i, column in ipairs(t.columns) do
+        t.c[column.header:gsub(" ", "")] = i
+    end
 
     win.setVisible(false)
 
@@ -336,11 +343,43 @@ end
 
 --#endregion
 
+function listed:sort(by, desc)
+    expect(1, by, "number")
+    assert(by > 0, "bad argument #1, must be above 0")
+    assert(by <= #self.columns, ("bad argument #1, must be below %d (column count)"):format(#self.columns))
+    expect(2, desc, "boolean", "nil")
+
+    local sortFunc = self.columns[by].sorting or function(a, b)
+        if type(a) == "boolean" then
+            return a and not b
+        end
+        return a < b
+    end
+
+    table.sort(self.rows, function(a, b)
+        if desc then
+            return sortFunc(b[by], a[by])
+        else
+            return sortFunc(a[by], b[by])
+        end
+    end)
+end
+
 ---Display the list and gather input for it
-function listed:display(offset)
+function listed:display(offset, sortBy, sortDesc)
+    expect(1, offset, "number", nil)
     offset = offset or 0
     if type(offset) ~= "number" or offset < 0 then
         error(("The offset must be a postitive integer, not %d"):format(offset))
+    end
+    expect(2, sortBy, "number", "nil")
+    expect(3, sortDesc, "boolean", "nil")
+    if sortDesc ~= nil then
+        assert(sortBy ~= nil, "Bad arguments, #2 required when #3 supplied")
+    end
+
+    if sortBy ~= nil then
+        self:sort(sortBy, sortDesc)
     end
 
     self.win.setVisible(true)
@@ -365,10 +404,14 @@ function listed:display(offset)
     for i, column in ipairs(self.columns) do
         accXAt[i] = accX
         term.setCursorPos(accX, 1)
-        term.write(cutoff(column.header, widths[i], self.config.cutoff))
+        local headerStr = column.header
+        if i == sortBy then
+            headerStr = (sortDesc and "\x1F" or "\x1E") .. headerStr
+        end
+        term.write(cutoff(headerStr, widths[i], self.config.cutoff))
         accX = accX + widths[i] + self.config.gapSize
     end
-    for rowI = 1 + offset, math.min(#self.rows, h-1) do
+    for rowI = 1 + offset, math.min(#self.rows, h - 1) do
         local row = self.rows[rowI]
         local rowY = rowI + 1 - offset
         term.setCursorPos(1, rowY)
