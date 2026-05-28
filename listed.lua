@@ -370,7 +370,8 @@ function listed:display(offset)
     end
     for rowI = 1 + offset, math.min(#self.rows, h-1) do
         local row = self.rows[rowI]
-        term.setCursorPos(1, rowI + 1)
+        local rowY = rowI + 1 - offset
+        term.setCursorPos(1, rowY)
 
         local fgColor = self.config.style.rowFg[((rowI - 1) % #self.config.style.rowFg) + 1]
         term.setBackgroundColor(fgColor)
@@ -378,7 +379,7 @@ function listed:display(offset)
         term.setBackgroundColor(bgColor)
         term.clearLine()
         for columnI, value in ipairs(row) do
-            term.setCursorPos(accXAt[columnI], rowI + 1)
+            term.setCursorPos(accXAt[columnI], rowY)
             local value_str = cutoff(value, widths[columnI], self.config.cutoff)
             if self.config.pretty then
                 value_str = cutoff(pretty.render(pretty.pretty(value)), widths[columnI], self.config.cutoff)
