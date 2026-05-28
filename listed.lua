@@ -374,15 +374,15 @@ function listed:display(offset, sortBy, sortDesc)
     end
     expect(2, sortBy, "number", "nil")
     expect(3, sortDesc, "boolean", "nil")
-    if sortDesc ~= nil then
-        assert(sortBy ~= nil, "Bad arguments, #2 required when #3 supplied")
+    if sortDesc ~= nil and sortBy == nil then
+        error("Bad arguments, #2 required when #3 supplied", 2)
     end
 
-    if sortBy ~= nil then
+    if sortBy ~= nil and sortBy > 0 then
         self:sort(sortBy, sortDesc)
     end
 
-    self.win.setVisible(true)
+    self.win.setVisible(false)
     local w, h = self.win.getSize()
     local widths, err = calculateWidths(w, self.rows, self.columns, self.config.gapSize)
     if not widths then
@@ -407,6 +407,9 @@ function listed:display(offset, sortBy, sortDesc)
         local headerStr = column.header
         if i == sortBy then
             headerStr = (sortDesc and "\x1F" or "\x1E") .. headerStr
+        end
+        if #headerStr < widths[i] then
+            headerStr = headerStr .. (" "):rep(widths[i] - #headerStr)
         end
         term.write(cutoff(headerStr, widths[i], self.config.cutoff))
         accX = accX + widths[i] + self.config.gapSize
@@ -443,7 +446,45 @@ function listed:display(offset, sortBy, sortDesc)
 
     term.redirect(oldTerm)
 
-    self.win.setVisible(false)
+    self.win.setVisible(true)
+
+    return widths
+end
+
+function listed:run(offset, sortBy, sortDesc)
+    while true do
+        local columnWidths = self:display(offset, sortBy, sortDesc)
+        local data = { os.pullEvent() }
+        local event = table.remove(data, 1)
+        if event == "mouse_click" then
+            local btn, x, y = table.unpack(data)
+            local wX, wY = self.win.getPosition()
+            x = x - wX + 1
+            y = y - wY + 1
+            if btn == 1 and y == 1 then --left click
+                local column = 0
+                local acc = 0
+                for i, width in ipairs(columnWidths) do
+                    column = i
+                    acc = acc + width
+                    if x <= acc then
+                        break
+                    end
+                    acc = acc + 1
+                    if x == acc then -- inbetween
+                        column = -1
+                        break
+                    end
+                end
+                if sortBy ~= column then
+                    sortBy = column
+                    sortDesc = false
+                else
+                    sortDesc = not sortDesc
+                end
+            end
+        end
+    end
 end
 
 return {

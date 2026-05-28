@@ -10,7 +10,7 @@ local list = listed.create(win, {
         {
             type = "number",
             header = "Id",
-            width = 2,
+            width = 3,
         },
         {
             type = "string",
@@ -37,4 +37,6 @@ list:add { 4, "averyveryveryverylongbigstringthatisclippedandold", 324 }
 
 list:sort(3, false)
 
-list:display(0, list.c.Id)
+-- list:display(0, list.c.Id)
+
+list:run(0, list.c.Age)
