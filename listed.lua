@@ -1,6 +1,7 @@
 local cc_expect = require "cc.expect"
 local expect = cc_expect.expect
 local field = cc_expect.field
+local pprint = require "cc.pretty".pretty_print
 
 ---@class listedColumnPattern
 ---@field type type|type[] Type(s) of the column
@@ -90,10 +91,15 @@ end
 ---@param totalWidth integer Total width available
 ---@param rows any[][]
 ---@param columns listedColumnPatternUnified[]
----@param gapSize integer Width of gaps between columns
+---@param gapSize? integer Width of gaps between columns
 ---@return integer[]? widths Table of column width, or nil in case of failure
 ---@return string? err Reason of failure
 local function calculateWidths(totalWidth, rows, columns, gapSize)
+    expect(1, totalWidth, "number")
+    expect(2, rows, "table")
+    if #rows == 0 then error("Rows are required", 2) end
+    expect(3, columns, "table")
+    expect(4, gapSize, "number", "nil")
     gapSize = gapSize or 1
     local totalGapSize = (#columns - 1) * gapSize
 
@@ -115,6 +121,7 @@ local function calculateWidths(totalWidth, rows, columns, gapSize)
     for _, row in ipairs(rows) do
         for columnI, v in ipairs(row) do
             local width = #tostring(v)
+            if type(v) == "table" then width = #table.concat(v, ", ") end
             if not maxWidths[columnI] or width > maxWidths[columnI] then
                 maxWidths[columnI] = width
             end
@@ -122,7 +129,7 @@ local function calculateWidths(totalWidth, rows, columns, gapSize)
     end
 
     local totalMaxWidth = 0
-    for i, maxWidth in ipairs(maxWidths) do
+    for i, maxWidth in pairs(maxWidths) do
         if fixed[i] == nil then
             totalMaxWidth = totalMaxWidth + maxWidth
         end
@@ -134,7 +141,7 @@ local function calculateWidths(totalWidth, rows, columns, gapSize)
 
     local assignedWidth = 0
     local remainders = {}
-    for i, maxWidth in ipairs(maxWidths) do
+    for i, maxWidth in pairs(maxWidths) do
         if fixed[i] ~= nil then
             computedWidths[i] = fixed[i]
         else
@@ -160,8 +167,9 @@ local function calculateWidths(totalWidth, rows, columns, gapSize)
     end)
 
     for i = 1, leftover do
-        computedWidths[remainders[i].index] =
-            computedWidths[remainders[i].index] + 1
+        local iMod = ((i - 1) % #remainders) + 1 -- a % b is [0, b-1] but we want [1, b]
+        computedWidths[remainders[iMod].index] =
+            computedWidths[remainders[iMod].index] + 1
     end
 
     return computedWidths
@@ -349,6 +357,8 @@ function listed:sort(by, desc)
     expect(2, desc, "boolean", "nil")
 
     local sortFunc = self.columns[by].sorting or function(a, b)
+        if type(a) == "table" then a = table.concat(a, ", ") end
+        if type(b) == "table" then b = table.concat(b, ", ") end
         if type(a) == "boolean" then
             return a and not b
         end
@@ -436,6 +446,7 @@ function listed:display(offset, sortBy, sortDesc, scrollbar, scrollmode)
         term.clearLine()
         for columnI, value in ipairs(row) do
             term.setCursorPos(accXAt[columnI], rowY)
+            if type(value) == "table" then value = table.concat(value, ", ") end
             local value_str = cutoff(value, widths[columnI], self.config.cutoff)
             if self.config.pretty then
                 value_str = cutoff(value, widths[columnI], self.config.cutoff)
